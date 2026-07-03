@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="https://www.miruro.to/icon-512x512.png" alt="Miruro API" width="150" style="border-radius: 20%; box-shadow: 0 0 20px rgba(56, 189, 248, 0.5);">
+  <img src="https://www.miruro.to/assets/logo-Dnw3w3dS.png?v=1.12.0" alt="Miruro API" width="150" style="border-radius: 20%; box-shadow: 0 0 20px rgba(56, 189, 248, 0.5);">
   <br><br>
   
-  # Miruro API v2.0
+  # Miruro API v3.0
   
   **The ultimate, decrypted, and fully reverse-engineered native Python backend for Miruro.**
   
@@ -10,6 +10,18 @@
 </div>
 
 <br>
+
+---
+
+## ⚠️ Cloudflare Notice (Important)
+
+Miruro's pipe endpoint (`/api/secure/pipe`) is now protected by **Cloudflare**.
+
+- **Do NOT host on Vercel** — Vercel uses datacenter IPs that are hard-blocked by Cloudflare's WAF. Requests to the pipe will always return `403`.
+- **Do NOT host on Render free tier, Railway, or similar PaaS** — same problem; shared datacenter IPs get blocked.
+- ✅ **Host on a VPS** (DigitalOcean, Hetzner, Linode, Vultr, etc.) with a clean non-datacenter IP, or run locally on your own machine.
+
+The API uses **`curl_cffi`** with Chrome TLS fingerprinting and proper same-origin headers to bypass Cloudflare's bot detection. This works from residential and most VPS IPs, but not from known datacenter ranges.
 
 ---
 
@@ -25,6 +37,21 @@ Miruro's frontend communicates with its backend through a `secure/pipe` tunnel t
 6. **Autocomplete** search suggestions for dropdown UIs
 
 No headless browsers, no Selenium — just lightweight async HTTP requests.
+
+<br>
+
+## Setup
+
+```bash
+git clone https://github.com/walterwhite-69/Miruro-API.git
+cd Miruro-API
+pip install -r requirements.txt
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Then open `http://localhost:8000/` for interactive API docs.
+
+> **Windows users:** If you see a `RuntimeWarning` about `Proactor event loop`, that's a harmless `curl_cffi` warning — the API works fine.
 
 <br>
 
@@ -113,11 +140,11 @@ To get a video stream, follow these 3 steps in order:
 
 #### Step 1: Get Episodes — `GET /episodes/{anilist_id}`
 
-Returns all episodes from multiple providers (kiwi, arc, zoro, jet, etc.) organized by audio type.
+Returns all episodes from multiple providers (kiwi, arc, zoro, hop, etc.) organized by audio type.
 
 ```json
 {
-  "mappings": { "anilistId": 178005, "malId": 56885, "kitsuId": ... },
+  "mappings": { "anilistId": 178005, "malId": 56885, "kitsuId": "..." },
   "providers": {
     "kiwi": {
       "episodes": {
@@ -126,7 +153,7 @@ Returns all episodes from multiple providers (kiwi, arc, zoro, jet, etc.) organi
             "id": "watch/kiwi/178005/sub/animepahe-1",
             "number": 1,
             "title": "Episode Title",
-            "image": "https://serveproxy.com/url?url=...",
+            "image": "https://...",
             "airDate": "2026-01-04",
             "duration": 1420,
             "description": "...",
@@ -146,7 +173,7 @@ Returns all episodes from multiple providers (kiwi, arc, zoro, jet, etc.) organi
 
 Just take the direct `id` from the Step 1 response and use it as the URL. No manual parameters or complex IDs needed!
 
-**Endpoint:** `GET /{id}`
+**Endpoint:** `GET /{id}`  
 **Example:** `GET /watch/kiwi/178005/sub/animepahe-1`
 
 ```json
@@ -177,16 +204,14 @@ Feed `streams[0].url` into any HLS player (Video.js, hls.js, VLC, mpv). Subtitle
 
 <br>
 
-## Setup
+## How Cloudflare Bypass Works
 
-```bash
-git clone https://github.com/walterwhite-69/Miruro-API.git
-cd Miruro-API
-pip install -r requirements.txt  
-uvicorn api:app --host 0.0.0.0 --port 8000
-```
+The pipe endpoint at `miruro.tv/api/secure/pipe` is behind Cloudflare. The API bypasses it by:
 
-Then open `http://localhost:8000/` for interactive API docs.
+1. Using **`curl_cffi`** with `chrome110` impersonation — this replicates Chrome's exact TLS fingerprint (JA3/JA4) at the socket level, making the request look indistinguishable from a real browser
+2. Sending the correct **same-origin headers**: `sec-fetch-site: same-origin`, `sec-fetch-mode: cors`, `sec-fetch-dest: empty`, full `sec-ch-ua` stack, matching `Referer` and `Origin`
+
+This approach works from **residential IPs and most VPS providers**. Cloudflare's hard block only applies to known datacenter/CDN IP ranges (Vercel, Render, AWS Lambda, Cloudflare Workers, etc.).
 
 <br>
 

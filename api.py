@@ -8,20 +8,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── config from .env ──
+def _env_list(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+ALLOWED_ORIGINS = _env_list("ALLOWED_ORIGINS", ["*"])
+
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+CACHE_EPISODES_HOURS = float(os.getenv("CACHE_EPISODES_HOURS", "0"))
+
+MIRURO_BASE_URL = os.getenv("MIRURO_BASE_URL", "https://www.miruro.tv").rstrip("/")
+PIPE_IMPERSONATE = os.getenv("PIPE_IMPERSONATE", "chrome110")
+
 app = FastAPI(title="Miruro API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Referer": "https://www.miruro.tv/",
-    "Origin": "https://www.miruro.tv",
+    "User-Agent": os.getenv("PIPE_USER_AGENT") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "Referer": f"{MIRURO_BASE_URL}/",
+    "Origin": MIRURO_BASE_URL,
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
@@ -32,8 +49,29 @@ HEADERS = {
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
 }
+
+_pipe_extra_headers_raw = os.getenv("PIPE_EXTRA_HEADERS")
+if _pipe_extra_headers_raw:
+    try:
+        HEADERS.update(json.loads(_pipe_extra_headers_raw))
+    except json.JSONDecodeError:
+        pass
+
 ANILIST_URL = "https://graphql.anilist.co"
-MIRURO_PIPE_URL = "https://www.miruro.tv/api/secure/pipe"
+MIRURO_PIPE_URL = f"{MIRURO_BASE_URL}/api/secure/pipe"
+
+# ── optional redis cache (used for /episodes) ──
+_redis_client = None
+if REDIS_HOST and REDIS_PASSWORD and CACHE_EPISODES_HOURS > 0:
+    import redis.asyncio as aioredis
+    _redis_host_clean = REDIS_HOST.replace("https://", "").replace("http://", "")
+    _redis_client = aioredis.Redis(
+        host=_redis_host_clean,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        ssl=True,
+        decode_responses=True,
+    )
 
 def _proxy_img(url: str) -> str:
     return url
@@ -66,6 +104,16 @@ def _inject_source_slugs(data: dict, anilist_id: int):
     return data
 
 async def _fetch_raw_episodes(anilist_id: int) -> dict:
+    cache_key = f"episodes:{anilist_id}"
+
+    if _redis_client is not None:
+        try:
+            cached = await _redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass  # cache unavailable, fall through to a live fetch
+
     payload = {
         "path": "episodes",
         "method": "GET",
@@ -74,13 +122,20 @@ async def _fetch_raw_episodes(anilist_id: int) -> dict:
         "version": "0.1.0",
     }
     encoded_req = _encode_pipe_request(payload)
-    async with AsyncSession(impersonate="chrome110") as client:
+    async with AsyncSession(impersonate=PIPE_IMPERSONATE) as client:
         res = await client.get(f"{MIRURO_PIPE_URL}?e={encoded_req}", headers=HEADERS)
         if res.status_code != 200:
             raise HTTPException(status_code=res.status_code, detail={"status": res.status_code, "body": res.text[:500], "headers": dict(res.headers)})
         data = _decode_pipe_response(res.text.strip())
         _deep_translate(data)
-        return data
+
+    if _redis_client is not None:
+        try:
+            await _redis_client.set(cache_key, json.dumps(data), ex=int(CACHE_EPISODES_HOURS * 3600))
+        except Exception:
+            pass  # caching is best-effort, don't fail the request over it
+
+    return data
 
 MEDIA_LIST_FIELDS = """
     id
@@ -363,6 +418,17 @@ code{font-family:var(--mono);font-size:.85em;color:#a5b4fc;background:rgba(165,1
     <div class="chip">v3.0 &nbsp;·&nbsp; Live</div>
   </div>
 
+  <!-- ── system ── -->
+  <div class="section">
+    <div class="section-head"><h2>System</h2><div class="section-line"></div></div>
+
+    <div class="card">
+      <div class="card-top"><span class="method">GET</span><span class="path">/health</span><span class="badge b-new">NEW</span></div>
+      <p class="desc">Check the current online/offline status of the API service and Redis cache.</p>
+      <a class="try" href="/health" target="_blank">Try it</a>
+    </div>
+  </div>
+
   <!-- ── search ── -->
   <div class="section">
     <div class="section-head"><h2>Search &amp; Discovery</h2><div class="section-line"></div></div>
@@ -580,6 +646,22 @@ code{font-family:var(--mono);font-size:.85em;color:#a5b4fc;background:rgba(165,1
 </script>
 </body>
 </html>"""
+
+@app.get("/health")
+async def health_check():
+    health_status = {
+        "status": "online",
+        "redis": "disabled"
+    }
+    
+    if _redis_client is not None:
+        try:
+            await _redis_client.ping()
+            health_status["redis"] = "online"
+        except Exception:
+            health_status["redis"] = "offline"
+            
+    return health_status
 
 @app.get("/search")
 async def search_anime(
@@ -1011,7 +1093,7 @@ async def get_sources(
         "version": "0.1.0",
     }
     encoded_req = _encode_pipe_request(payload)
-    async with AsyncSession(impersonate="chrome110") as client:
+    async with AsyncSession(impersonate=PIPE_IMPERSONATE) as client:
         res = await client.get(f"{MIRURO_PIPE_URL}?e={encoded_req}", headers=HEADERS)
         if res.status_code != 200:
             raise HTTPException(status_code=res.status_code, detail={"status": res.status_code, "body": res.text[:500], "headers": dict(res.headers)})
